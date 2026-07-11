@@ -1,22 +1,18 @@
 #!/usr/bin/env bash
+set -euo pipefail
 
-PORT=5000
-echo "preparing port $PORT…"
-fuser -k $PORT/tcp
+PORT="${PORT:-5000}"
+APP_DIR=/app/build/web
+SCRIPT_DIR=/app/server
 
-cd /app/build/web/
+echo "Preparing RustDesk Web configuration on port $PORT…"
+cd "$APP_DIR"
 
-cat > env-config.js <<EOF
-// ce script est exécuté avant le main.js de ton app
-window.localStorage.setItem("custom-rendezvous-server", "${CUSTOM_RENDEZVOUS_SERVER:-}");
-window.localStorage.setItem("relay-server",             "${RELAY_SERVER:-}");
-window.localStorage.setItem("api-server",               "${API_SERVER:-api.rustdesk.com}");
-window.localStorage.setItem("key",                      "${KEY:-}");
-EOF
+python3 "$SCRIPT_DIR/generate_env_config.py" "$APP_DIR/env-config.js"
 
-if ! grep -q "env-config.js" index.html; then
+if ! grep -Fq 'src="env-config.js"' index.html; then
   sed -i 's|</head>|  <script src="env-config.js"></script>\n</head>|' index.html
 fi
 
 echo "Server starting on port $PORT…"
-python3 -m http.server $PORT
+exec python3 -m http.server --bind 0.0.0.0 "$PORT"

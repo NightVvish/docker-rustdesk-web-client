@@ -3,11 +3,15 @@
 ###############################################################################
 # Étape 1 — Build JS/TS (RustDesk front)
 ###############################################################################
-FROM node:20-slim AS js-build
+FROM node:20-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS js-build
 
 # ————— paramètres build ——————————————
 ARG RUSTDESK_REPO=MonsieurBiche/rustdesk-web-client
-ARG RUSTDESK_TAG=add-features
+ARG RUSTDESK_TAG=fix-build
+# Un SHA explicite prime sur la branche. Le commit attendu verrouille uniquement
+# la combinaison dépôt/branche par défaut et ne gêne pas les sources personnalisées.
+ARG RUSTDESK_COMMIT=
+ARG RUSTDESK_EXPECTED_COMMIT=525b5e561faf824850c71500adf463e4e0a504d4
 ARG ENABLE_WSS=true
 
 # ————— dépendances système minimales ————
@@ -23,33 +27,56 @@ WORKDIR /src
 RUN git clone --branch "${RUSTDESK_TAG}" \
         --depth 1 \
         --recursive --shallow-submodules \
-        "https://github.com/${RUSTDESK_REPO}.git" rustdesk \
- && cd rustdesk \
- && git submodule update --init --recursive --depth 1
+        "https://github.com/${RUSTDESK_REPO}.git" rustdesk
+RUN target_commit="${RUSTDESK_COMMIT}" \
+ && if [ -z "${target_commit}" ] \
+      && [ "${RUSTDESK_REPO}" = "MonsieurBiche/rustdesk-web-client" ] \
+      && [ "${RUSTDESK_TAG}" = "fix-build" ]; then \
+      target_commit="${RUSTDESK_EXPECTED_COMMIT}"; \
+    fi \
+ && if [ -n "${target_commit}" ]; then \
+      current_commit="$(git -C rustdesk rev-parse HEAD)"; \
+      if [ "${current_commit}" != "${target_commit}" ]; then \
+        git -C rustdesk fetch --depth 1 origin "${target_commit}"; \
+        git -C rustdesk checkout --detach "${target_commit}"; \
+      fi; \
+    fi \
+ && git -C rustdesk submodule update --init --recursive --depth 1
 
 # ————— copie des sources JS ————————
 WORKDIR /src/rustdesk/flutter/web
 RUN if [ -d "v1" ]; then cp -a v1/* .; fi
 
-RUN sed -i '/chunkFileNames:/a\        manualChunks(id) {\
+RUN set -eu; \
+    config=/src/rustdesk/flutter/web/js/vite.config.js; \
+    if ! grep -q 'manualChunks(id)' "$config"; then \
+      grep -q 'chunkFileNames:' "$config"; \
+      sed -i '/chunkFileNames:/a\        manualChunks(id) {\
           if (id.includes("node_modules")) return "vendor";\
-        },' /src/rustdesk/flutter/web/js/vite.config.js
+        },' "$config"; \
+    fi; \
+    grep -q 'manualChunks(id)' "$config"
 
 # --- Fix appBarActions parameter (web build) ---
-RUN sed -i 's/ConnectionPage(key: _connKey);/ConnectionPage(key: _connKey, appBarActions: const <Widget>[]);/' \
-    /src/rustdesk/flutter/lib/mobile/pages/home_page.dart
+RUN set -eu; \
+    source=/src/rustdesk/flutter/lib/mobile/pages/home_page.dart; \
+    if grep -q 'ConnectionPage(key: _connKey);' "$source"; then \
+      sed -i 's/ConnectionPage(key: _connKey);/ConnectionPage(key: _connKey, appBarActions: const <Widget>[]);/' "$source"; \
+    fi; \
+    grep -q 'appBarActions:' "$source"
 
 WORKDIR /src/rustdesk/flutter/web/js
 
 # ————— install Yarn + deps (cache BuildKit) —
 RUN --mount=type=cache,target=/usr/local/share/.cache/yarn \
     corepack enable && \
-    corepack prepare "yarn@1.22.22" --activate && \
-    yarn install --non-interactive --silent;
+    corepack prepare "yarn@3.2.0" --activate && \
+    yarn install --immutable
 
 # ————— patch WSS éventuel —————————
 RUN if [ "$ENABLE_WSS" = "true" ]; then \
-      find . -name "*.ts" -o -name "*.js" | xargs sed -i 's#ws://#wss://#g'; \
+      find . -type f \( -name "*.ts" -o -name "*.js" \) \
+        -exec sed -i 's#ws://#wss://#g' {} +; \
     fi
 
 # --- RustDesk localStorage bootstrap & sanitization ---
@@ -82,7 +109,8 @@ RUN HTML=/src/rustdesk/flutter/web/index.html && \
     if(localStorage.getItem(k)===null)\
       localStorage.setItem(k,typeof val==="string"?val:JSON.stringify(val));\
 })();\
-</script>' "$HTML"
+</script>' "$HTML" && \
+    grep -q 'const defaults=' "$HTML"
 
 
 # ————— build JS ————————————————
@@ -91,9 +119,10 @@ RUN yarn build
 ###############################################################################
 # Étape 2 — Build Flutter Web
 ###############################################################################
-FROM debian:bookworm-slim AS flutter-build
+FROM debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df AS flutter-build
 
 ARG FLUTTER_VERSION=3.22.1
+ARG RUST_VERSION=1.97.0
 ENV FLUTTER_HOME=/opt/flutter
 ENV PATH="$FLUTTER_HOME/bin:$FLUTTER_HOME/bin/cache/dart-sdk/bin:$PATH"
 ENV RUSTFLAGS='--cfg getrandom_backend="js"'
@@ -107,11 +136,13 @@ RUN apt-get update && \
         libgtk-3-dev libgl1-mesa-dev libglu1-mesa wget && \
     rm -rf /var/lib/apt/lists/*
 
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 # ————— Rust + target wasm (cache BuildKit) —
 RUN --mount=type=cache,target=/usr/local/cargo \
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-    sh -s -- -y --no-modify-path && \
-    . $HOME/.cargo/env && \
+    sh -s -- -y --no-modify-path --default-toolchain "${RUST_VERSION}" && \
+    source "$HOME/.cargo/env" && \
     rustup target add wasm32-unknown-unknown
 
 # ————— Flutter SDK (cache BuildKit) —————
@@ -125,17 +156,16 @@ RUN --mount=type=cache,target=/root/.cache/flutter \
 COPY --from=js-build /src/rustdesk /build/rustdesk
 WORKDIR /build/rustdesk/flutter
 
-# 3) Dépendances web externes
-RUN wget -qO /tmp/web_deps.tar.gz \
-      https://github.com/pmietlicki/docker-rustdesk-web-client/raw/refs/heads/main/web_deps.tar.gz && \
-    tar -xzf /tmp/web_deps.tar.gz -C web/ && \
+# 3) Dépendances web externes, versionnées avec ce dépôt
+COPY web_deps.tar.gz /tmp/web_deps.tar.gz
+RUN tar -xzf /tmp/web_deps.tar.gz -C web/ && \
     rm /tmp/web_deps.tar.gz
 
 # ─── build Flutter web (stage flutter-build) ────────────────────────────────
 ENV FLUTTER_ALLOW_ROOT=1
 RUN --mount=type=cache,target=/usr/local/cargo \
     --mount=type=cache,target=/root/.cache/flutter \
-    . $HOME/.cargo/env && \
+    source "$HOME/.cargo/env" && \
     flutter build web --release && \
     \
     # place le bundle Vite
@@ -145,87 +175,18 @@ RUN --mount=type=cache,target=/usr/local/cargo \
 ###############################################################################
 # Étape 3 — Runtime Nginx ultra-léger (adapté pour RustDesk Web v1)
 ###############################################################################
-FROM nginx:alpine AS final
+FROM nginx:alpine@sha256:54f2a904c251d5a34adf545a72d32515a15e08418dae0266e23be2e18c66fefa AS final
 
 # ————— assets statiques —————————————
 COPY --from=flutter-build /build/rustdesk/flutter/build/web /usr/share/nginx/html
 
-RUN apk add --no-cache perl
-
-# ————— configuration Nginx ————————————
-# On utilise un placeholder HOST qu’on remplacera à l’entrée
-COPY <<'EOF' /etc/nginx/conf.d/default.conf
-upstream api {
-    server PLACEHOLDER_HOST:21114;
-}
-upstream ws_id {
-    server PLACEHOLDER_HOST:21118;
-}
-upstream ws_relay {
-    server PLACEHOLDER_HOST:21119;
-}
-server {
-    listen 80;
-    root /usr/share/nginx/html;
-    index index.html;
-
-    # SPA fallback
-    location / {
-        try_files $uri $uri/ /index.html;
-        add_header X-Frame-Options "SAMEORIGIN";
-        add_header X-Content-Type-Options "nosniff";
-        add_header X-XSS-Protection "1; mode=block";
-    }
-
-    # Proxy pour l’API RustDesk
-    location /api/ {
-        proxy_pass PROTO://api;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    }
-
-    # WebSocket pour l’ID server (port 21118) :contentReference[oaicite:0]{index=0}
-    location /ws/id {
-        proxy_pass PROTO://ws_id;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-    }
-
-    # WebSocket pour le relay server (port 21119) :contentReference[oaicite:1]{index=1}
-    location /ws/relay {
-        proxy_pass PROTO://ws_relay;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-    }
-
-    # cache long des assets
-    location ~* \.(js|css|wasm|png|jpg|jpeg|gif|svg|woff2?)$ {
-        expires 1y;
-        add_header Cache-Control "public, immutable";
-    }
-}
-EOF
-
-# ————— entrypoint dynamique ————————
-# Remplace PLACEHOLDER_HOST par la valeur de BACKEND_HOST (ou localhost par défaut)
-COPY <<'EOF' /docker-entrypoint.sh
-#!/bin/sh
-set -e
-# par défaut on pointe vers localhost
-HOST="${BACKEND_HOST:-127.0.0.1}"
-PROTO="${PROTO:-http}"
-sed -i "s/PLACEHOLDER_HOST/$HOST/g" /etc/nginx/conf.d/default.conf
-sed -i "s/PROTO/$PROTO/g" /etc/nginx/conf.d/default.conf
-exec nginx -g 'daemon off;'
-EOF
-
-RUN chmod +x /docker-entrypoint.sh
+# ————— configuration et entrypoint Nginx ————————————
+COPY docker/nginx/default.conf.template /etc/nginx/templates/default.conf.template
+COPY docker/nginx/entrypoint.sh /docker-entrypoint.sh
+RUN chmod 0755 /docker-entrypoint.sh
 
 EXPOSE 80
-HEALTHCHECK CMD wget -qO- http://localhost/ || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -qO- http://127.0.0.1/ >/dev/null || exit 1
+STOPSIGNAL SIGQUIT
 ENTRYPOINT ["/docker-entrypoint.sh"]

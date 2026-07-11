@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends shellcheck
+
+      - name: Validate shell scripts
+        run: |
+          bash -n build.sh v1/server/server.sh tests/*.sh
+          sh -n docker/nginx/entrypoint.sh
+          shellcheck -x \
+            build.sh \
+            docker/nginx/entrypoint.sh \
+            v1/server/server.sh \
+            tests/*.sh
+
+      - name: Run unit and runtime configuration tests
+        run: |
+          python3 -m unittest discover -s tests -p 'test_*.py' -v
+          tests/test_build_script.sh
+          tests/test_nginx_entrypoint.sh
+
+      - name: Validate Docker Compose
+        run: docker compose config --quiet
+
+      - name: Lint Dockerfiles
+        run: |
+          docker run --rm --interactive \
+            --volume "$PWD/.hadolint.yaml:/.hadolint.yaml:ro" \
+            hadolint/hadolint@sha256:3c206a451cec6d486367e758645269fd7d696c5ccb6ff59d8b03b0e45268a199 \
+            /bin/hadolint --config /.hadolint.yaml - < Dockerfile
+          docker run --rm --interactive \
+            --volume "$PWD/.hadolint.yaml:/.hadolint.yaml:ro" \
+            hadolint/hadolint@sha256:3c206a451cec6d486367e758645269fd7d696c5ccb6ff59d8b03b0e45268a199 \
+            /bin/hadolint --config /.hadolint.yaml - < v1/Dockerfile
+
+      - name: Validate Docker build definitions
+        run: |
+          docker build --check .
+          docker build --check --file v1/Dockerfile .
+
+      - name: Validate tracked web dependencies archive
+        run: tar -tzf web_deps.tar.gz >/dev/null
+
+  build-and-smoke-test:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: current
+            dockerfile: Dockerfile
+            container_port: 80
+          - variant: v1
+            dockerfile: v1/Dockerfile
+            container_port: 5000
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build ${{ matrix.variant }} image
+        run: |
+          docker build \
+            --file "${{ matrix.dockerfile }}" \
+            --tag "rustdesk-web-client:${{ matrix.variant }}-test" \
+            .
+
+      - name: Smoke-test ${{ matrix.variant }} image
+        run: |
+          set -Eeuo pipefail
+          container="rustdesk-${{ matrix.variant }}-test"
+          cleanup() { docker rm --force "$container" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+
+          run_args=(
+            --detach
+            --name "$container"
+            --publish "127.0.0.1:18080:${{ matrix.container_port }}"
+          )
+          if [[ "${{ matrix.variant }}" == current ]]; then
+            run_args+=(--env BACKEND_HOST=127.0.0.1 --env PROTO=http)
+          else
+            run_args+=(--env API_SERVER=api.rustdesk.com)
+          fi
+
+          docker run "${run_args[@]}" \
+            "rustdesk-web-client:${{ matrix.variant }}-test" >/dev/null
+
+          health=starting
+          for _ in {1..60}; do
+            health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container")"
+            [[ "$health" == healthy ]] && break
+            sleep 1
+          done
+
+          if [[ "$health" != healthy ]]; then
+            docker logs "$container"
+            exit 1
+          fi
+          curl --fail --silent --show-error http://127.0.0.1:18080/ >/dev/null

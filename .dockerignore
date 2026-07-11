@@ -1,0 +1,13 @@
+.git
+.github
+.env
+.DS_Store
+*.log
+__pycache__
+tests
+Dockerfile_test
+QUICKSTART.md
+README.md
+build.sh
+config-examples.env
+docker-compose.yml

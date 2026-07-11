@@ -1,507 +1,145 @@
-# RustDesk Web Client - Optimized Version
+# RustDesk Web Client — images Docker
 
-⚠️ **IMPORTANT - Version Status** ⚠️
+Ce dépôt construit et exécute le client web RustDesk selon deux variantes clairement séparées.
 
-- ✅ **Version 1.1.10 (pmietlicki/docker-rustdesk-web-client:v1)** - **FULLY FUNCTIONAL**
-- ⚠️ **Version 1.3.2 (latest)** - **LIMITATIONS**: Interface doesn't allow configuring custom-rendezvous-server or relay
+| Variante | Image | Port interne | Configuration runtime |
+|---|---|---:|---|
+| Courante | `pmietlicki/docker-rustdesk-web-client:latest` | `80` | Proxy Nginx via `BACKEND_HOST` et `PROTO` |
+| Héritée v1 | `pmietlicki/docker-rustdesk-web-client:v1` | `5000` | Variables RustDesk injectées dans `localStorage` |
 
-**Recommendation**: Use version 1.1.10 for a complete production environment.
+La variante `v1` reste disponible pour les utilisateurs qui ont besoin de fournir directement les serveurs rendez-vous, relay et API au démarrage du conteneur.
 
----
+## Démarrage de la variante courante
 
-## 🚀 Version 1.1.10 - Fully Functional (Recommended)
-
-### Features
-- ✅ Complete custom server configuration support
-- ✅ Relay server configuration
-- ✅ Custom rendezvous server setup
-- ✅ Full UI control for server settings
-- ✅ Production-ready
-
-### Quick Start with Docker
-
-#### Basic Usage
-```bash
-docker run -d \
-  --name rustdesk-web \
-  -p 5000:5000 \
-  pmietlicki/docker-rustdesk-web-client:v1
-```
-
-#### With Custom Server Configuration
-```bash
-docker run -d \
-  --name rustdesk-web \
-  -p 5000:5000 \
-  -e CUSTOM_RENDEZVOUS_SERVER="your-server.com:21116" \
-  -e RELAY_SERVER="your-relay-server.com:21117" \
-  -e KEY="your-public-key" \
-  -e API_SERVER="your-api-server.com" \
-  pmietlicki/docker-rustdesk-web-client:v1
-```
-
-#### Complete Production Setup
-```bash
-docker run -d \
-  --name rustdesk-web-prod \
-  -p 443:5000 \
-  -e CUSTOM_RENDEZVOUS_SERVER="prod-server.yourcompany.com:21116" \
-  -e RELAY_SERVER="relay.yourcompany.com:21117" \
-  -e KEY="AAAAB3NzaC1yc2EAAAADAQABAAABgQC..." \
-  -e API_SERVER="api.yourcompany.com" \
-  pmietlicki/docker-rustdesk-web-client:v1
-```
-
-### Environment Variables (v1.1.10)
-
-| Variable | Description | Example |
-|----------|-------------|----------|
-| `CUSTOM_RENDEZVOUS_SERVER` | Your RustDesk server address:port | `my-server.com:21116` |
-| `RELAY_SERVER` | Relay server address:port | `relay.example.com:21117` |
-| `KEY` | Public key for encryption | `AAAAB3NzaC1yc2E...` |
-| `API_SERVER` | API server address | `api.example.com` |
-
-### Docker Compose (v1.1.10)
-
-```yaml
-version: '3.8'
-services:
-  rustdesk-web:
-    image: pmietlicki/docker-rustdesk-web-client:v1
-    container_name: rustdesk-web-v1
-    ports:
-      - "5000:5000"
-    environment:
-      - CUSTOM_RENDEZVOUS_SERVER=your-server.com:21116
-      - RELAY_SERVER=your-relay.com:21117
-      - KEY=your-public-key
-      - API_SERVER=your-api-server.com
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-```
-
-### Docker Compose
-
-```yaml
-version: '3.8'
-services:
-  rustdesk-web-client:
-    image: pmietlicki/docker-rustdesk-web-client:v1
-    container_name: rustdesk-web-client
-    ports:
-      - "5000:5000"
-    environment:
-      - CUSTOM_RENDEZVOUS_SERVER=votre-serveur.com
-      - RELAY_SERVER=votre-serveur.com
-      - KEY=votre-clé-publique
-      - API_SERVER=votre-api-serveur.com
-    restart: unless-stopped
-```
-
-### Kubernetes
-
-```yaml
-# 1) Namespace ─────────────────────────────────────────────────────────
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: rustdesk
-
----
-# 2) PVC pour données / clés ─────────────────────────────────────────────
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: rustdesk-data
-  namespace: rustdesk
-  labels:
-    app: rustdesk-server
-spec:
-  accessModes: [ReadWriteOnce]
-  resources:
-    requests:
-      storage: 50Gi
-
----
-# 3) Deployment hbbs + hbbr (RustDesk Server OSS) ───────────────────────
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: rustdesk-server
-  namespace: rustdesk
-  labels:
-    app: rustdesk-server
-spec:
-  replicas: 1
-  selector:
-    matchLabels: { app: rustdesk-server }
-  template:
-    metadata:
-      labels: { app: rustdesk-server }
-    spec:
-      containers:
-        - name: hbbs
-          image: docker.io/rustdesk/rustdesk-server:latest
-          imagePullPolicy: IfNotPresent
-          command: ["hbbs"]
-          args: ["-k","_"]
-          ports:
-            - name: nat-port
-              containerPort: 21115
-              protocol: TCP
-            - name: registry-port
-              containerPort: 21116
-              protocol: TCP
-            - name: heartbeat-port
-              containerPort: 21116
-              protocol: UDP
-            - name: web-port
-              containerPort: 21118
-              protocol: TCP
-          livenessProbe:
-            tcpSocket: { port: 21115 }
-            initialDelaySeconds: 5
-            periodSeconds: 10
-          readinessProbe:
-            tcpSocket: { port: 21115 }
-            initialDelaySeconds: 5
-            periodSeconds: 10
-          volumeMounts:
-            - name: rustdesk-data
-              mountPath: /root
-
-        - name: hbbr
-          image: docker.io/rustdesk/rustdesk-server:latest
-          imagePullPolicy: IfNotPresent
-          command: ["hbbr"]
-          args: ["-k","_"]
-          ports:
-            - name: relay-port
-              containerPort: 21117
-              protocol: TCP
-            - name: client-port
-              containerPort: 21119
-              protocol: TCP
-          livenessProbe:
-            tcpSocket: { port: 21117 }
-            initialDelaySeconds: 5
-            periodSeconds: 10
-          readinessProbe:
-            tcpSocket: { port: 21117 }
-            initialDelaySeconds: 5
-            periodSeconds: 10
-          volumeMounts:
-            - name: rustdesk-data
-              mountPath: /root
-
-      affinity:
-        podAntiAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector:
-                matchLabels: { app: rustdesk-server }
-              topologyKey: kubernetes.io/hostname
-
-      volumes:
-        - name: rustdesk-data
-          persistentVolumeClaim:
-            claimName: rustdesk-data
-
----
-# 4) Service LoadBalancer (MetalLB) ──────────────────────────────────────
-apiVersion: v1
-kind: Service
-metadata:
-  name: rustdesk-server
-  namespace: rustdesk
-  labels:
-    app: rustdesk-server
-spec:
-  type: LoadBalancer
-  externalTrafficPolicy: Cluster
-  selector: { app: rustdesk-server }
-  ports:
-    - name: nat-port
-      port: 21115
-      targetPort: 21115
-      protocol: TCP
-    - name: registry-port
-      port: 21116
-      targetPort: 21116
-      protocol: TCP
-    - name: heartbeat-port
-      port: 21116
-      targetPort: 21116
-      protocol: UDP
-    - name: web-port
-      port: 21118
-      targetPort: 21118
-      protocol: TCP
-    - name: relay-port
-      port: 21117
-      targetPort: 21117
-      protocol: TCP
-    - name: client-port
-      port: 21119
-      targetPort: 21119
-      protocol: TCP
-
----
-# 5) Deployment Web Client ───────────────────────────────────────────────
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: rustdesk-web-client
-  namespace: rustdesk
-  labels:
-    app: rustdesk-web-client
-spec:
-  replicas: 1
-  selector:
-    matchLabels: { app: rustdesk-web-client }
-  template:
-    metadata:
-      labels: { app: rustdesk-web-client }
-    spec:
-      containers:
-        - name: web-client
-          image: pmietlicki/rustdesk-web-client:v1
-          imagePullPolicy: Always
-          ports:
-            - containerPort: 5000
-          env:
-            - name: CUSTOM_RENDEZVOUS_SERVER
-              value: "rustdesk.test.local"
-            - name: RELAY_SERVER
-              value: "rustdesk.test.local"
-            - name: KEY
-              value: "xxxxxxxxxxxxxxxxxxxxxxx"
-          livenessProbe:
-            httpGet: { path: "/", port: 5000 }
-            initialDelaySeconds: 5
-            periodSeconds: 10
-          readinessProbe:
-            httpGet: { path: "/", port: 5000 }
-            initialDelaySeconds: 5
-            periodSeconds: 10
-
----
-# 6) Service ClusterIP pour Web Client ─────────────────────────────────
-apiVersion: v1
-kind: Service
-metadata:
-  name: rustdesk-web-client
-  namespace: rustdesk
-  labels:
-    app: rustdesk-web-client
-spec:
-  type: ClusterIP
-  selector: { app: rustdesk-web-client }
-  ports:
-    - port: 5000
-      targetPort: 5000
-      protocol: TCP
----
-# 7) Ingress unique WSS + HTTPS + Web UI ────────────────────────────────
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: rustdesk
-  namespace: rustdesk
-  annotations:
-    cert-manager.io/cluster-issuer: letsencrypt-prod
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
-    nginx.ingress.kubernetes.io/ssl-redirect: "false"
-    nginx.ingress.kubernetes.io/configuration-snippet: |
-      proxy_set_header Upgrade $http_upgrade;
-      proxy_set_header Connection $connection_upgrade;
-spec:
-  tls:
-    - hosts: [rustdesk.test.local]
-      secretName: rustdesk-server-tls
-  rules:
-    - host: rustdesk.test.local
-      http:
-        paths:
-          # WebSocket ID server hbbs
-          - path: /ws/id
-            pathType: Prefix
-            backend:
-              service: { name: rustdesk-server, port: { name: web-port } }
-          # WebSocket relay hbbr
-          - path: /ws/relay
-            pathType: Prefix
-            backend:
-              service: { name: rustdesk-server, port: { name: client-port } }
-          # Tout le reste → Web Client
-          - path: /
-            pathType: Prefix
-            backend:
-              service: { name: rustdesk-web-client, port: { number: 5000 } }
-```
-
----
-
-## 🔧 Version 1.3.2 - Latest (MonsieurBiche Fork)
-
-### Features
-- ✅ Latest Flutter improvements
-- ✅ Enhanced performance
-- ⚠️ **Limited UI configuration** for custom servers
-- ⚠️ Manual configuration required
-
-### Usage (v1.3.2)
+Copiez la configuration d’exemple, puis adaptez au minimum le backend RustDesk :
 
 ```bash
-# Basic usage - latest version
-docker run -d \
-  --name rustdesk-web-latest \
-  -p 5000:5000 \
+cp config-examples.env .env
+$EDITOR .env
+docker compose up --build --detach
+```
+
+L’interface est ensuite disponible sur <http://localhost:5000>.
+
+Le conteneur Nginx n’expose que son port HTTP `80`. Les connexions API et WebSocket sont relayées sur ce même port :
+
+- `/api/` vers le port backend `21114` ;
+- `/ws/id` vers le port backend `21118` ;
+- `/ws/relay` vers le port backend `21119`.
+
+`BACKEND_HOST` doit être un nom d’hôte ou une adresse IP joignable depuis le conteneur, sans schéma ni port. Une IPv6 doit être placée entre crochets. `PROTO` accepte uniquement `http` ou `https` et décrit la connexion entre Nginx et le backend ; la terminaison TLS publique doit être assurée par un reverse proxy ou un Ingress.
+
+Exécution directe de l’image publiée :
+
+```bash
+docker run --detach \
+  --name rustdesk-web-client \
+  --publish 5000:80 \
+  --env BACKEND_HOST=rustdesk.example.com \
+  --env PROTO=https \
   pmietlicki/docker-rustdesk-web-client:latest
 ```
 
-### Build from Source (v1.3.2)
+## Variante v1
 
 ```bash
-# Clone and build latest version
-git clone https://github.com/pmietlicki/docker-rustdesk-web-client.git
-cd docker-rustdesk-web-client
-
-# Build with MonsieurBiche improvements
-export RUSTDESK_BRANCH=enable-wss
-export ENABLE_WSS=true
-docker-compose up --build -d
-```
-
----
-
-## 📋 Prerequisites
-
-- Docker 20.10+
-- Docker Compose 2.0+
-- 4GB RAM minimum for build
-- Stable internet connection
-
-## 🔍 Troubleshooting
-
-### Version 1.1.10 Issues
-```bash
-# Check container logs
-docker logs rustdesk-web
-
-# Verify environment variables
-docker exec rustdesk-web env | grep -E "CUSTOM_RENDEZVOUS_SERVER|RELAY_SERVER|KEY|API_SERVER"
-
-# Test connectivity
-curl -f http://localhost:5000
-```
-
-### Version 1.3.2 Issues
-```bash
-# Check build logs
-docker-compose logs rustdesk-web
-
-# Rebuild without cache
-docker-compose down
-docker-compose up --build --no-cache
-```
-
-## 📚 Resources
-
-- [RustDesk Official](https://github.com/rustdesk/rustdesk)
-- [MonsieurBiche Fork](https://github.com/MonsieurBiche/rustdesk-web-client)
-- [Docker Hub - v1.1.10](https://hub.docker.com/r/pmietlicki/docker-rustdesk-web-client)
-
----
-
-# RustDesk Web Client - Version Optimisée (Français)
-
-⚠️ **IMPORTANT - Statut des versions** ⚠️
-
-- ✅ **Version 1.1.10 (pmietlicki/docker-rustdesk-web-client:v1)** - **TOTALEMENT FONCTIONNELLE**
-- ⚠️ **Version 1.3.2 (latest)** - **LIMITATIONS** : Interface ne permet pas de configurer le custom-rendezvous-server ni le relay
-
-**Recommandation** : Utilisez la version 1.1.10 pour un environnement de production complet.
-
----
-
-## 🚀 Version 1.1.10 - Totalement Fonctionnelle (Recommandée)
-
-### Fonctionnalités
-- ✅ Support complet de la configuration serveur personnalisé
-- ✅ Configuration du serveur relay
-- ✅ Configuration du serveur rendezvous personnalisé
-- ✅ Contrôle UI complet pour les paramètres serveur
-- ✅ Prêt pour la production
-
-### Démarrage Rapide avec Docker
-
-#### Utilisation Basique
-```bash
-docker run -d \
-  --name rustdesk-web \
-  -p 5000:5000 \
+docker run --detach \
+  --name rustdesk-web-v1 \
+  --publish 5000:5000 \
+  --env CUSTOM_RENDEZVOUS_SERVER=rustdesk.example.com:21116 \
+  --env RELAY_SERVER=rustdesk.example.com:21117 \
+  --env API_SERVER=api.example.com \
+  --env KEY='votre-clé-publique' \
   pmietlicki/docker-rustdesk-web-client:v1
 ```
 
-#### Avec Configuration Serveur Personnalisé
-```bash
-docker run -d \
-  --name rustdesk-web \
-  -p 5000:5000 \
-  -e CUSTOM_RENDEZVOUS_SERVER="votre-serveur.com:21116" \
-  -e RELAY_SERVER="votre-relay-serveur.com:21117" \
-  -e KEY="votre-clé-publique" \
-  -e API_SERVER="votre-api-serveur.com" \
-  pmietlicki/docker-rustdesk-web-client:v1
-```
+| Variable | Défaut | Description |
+|---|---|---|
+| `CUSTOM_RENDEZVOUS_SERVER` | vide | Serveur rendez-vous avec son port |
+| `RELAY_SERVER` | vide | Serveur relay avec son port |
+| `API_SERVER` | `api.rustdesk.com` | Serveur API |
+| `KEY` | vide | Clé publique RustDesk |
+| `PORT` | `5000` | Port HTTP interne de la variante v1 |
 
-#### Configuration Production Complète
-```bash
-docker run -d \
-  --name rustdesk-web-prod \
-  -p 443:5000 \
-  -e CUSTOM_RENDEZVOUS_SERVER="prod-serveur.votreentreprise.com:21116" \
-  -e RELAY_SERVER="relay.votreentreprise.com:21117" \
-  -e KEY="AAAAB3NzaC1yc2EAAAADAQABAAABgQC..." \
-  -e API_SERVER="api.votreentreprise.com" \
-  pmietlicki/docker-rustdesk-web-client:v1
-```
+Les valeurs sont sérialisées en JSON avant d’être écrites dans `env-config.js`, afin que les guillemets, antislashs et retours à la ligne ne puissent pas casser le JavaScript généré.
 
-### Variables d'Environnement (v1.1.10)
-
-| Variable | Description | Exemple |
-|----------|-------------|----------|
-| `CUSTOM_RENDEZVOUS_SERVER` | Adresse:port de votre serveur RustDesk | `mon-serveur.com:21116` |
-| `RELAY_SERVER` | Adresse:port du serveur relay | `relay.exemple.com:21117` |
-| `KEY` | Clé publique pour le chiffrement | `AAAAB3NzaC1yc2E...` |
-| `API_SERVER` | Adresse du serveur API | `api.exemple.com` |
-
----
-
-## 🔧 Version 1.3.2 - Dernière (Fork MonsieurBiche)
-
-### Fonctionnalités
-- ✅ Dernières améliorations Flutter
-- ✅ Performance améliorée
-- ⚠️ **Configuration UI limitée** pour les serveurs personnalisés
-- ⚠️ Configuration manuelle requise
-
-### Utilisation (v1.3.2)
+Construction locale de cette variante :
 
 ```bash
-# Utilisation basique - dernière version
-docker run -d \
-  --name rustdesk-web-latest \
-  -p 5000:5000 \
-  pmietlicki/docker-rustdesk-web-client:latest
+docker build --file v1/Dockerfile --tag rustdesk-web-client:v1-local .
 ```
 
-## 📄 Licence
+## Construction locale
 
-Suit la licence du projet RustDesk original (AGPL-3.0).
+Le script charge automatiquement `.env` sans l’exécuter comme du code shell.
+
+```bash
+./build.sh config   # configuration effective
+./build.sh image    # construire uniquement l’image
+./build.sh build    # nettoyer, construire, démarrer et contrôler la santé
+./build.sh status   # état Docker réel
+./build.sh logs     # suivre les logs
+./build.sh stop
+./build.sh start
+./build.sh clean
+./build.sh compose  # même parcours via Docker Compose
+```
+
+Le build par défaut utilise `MonsieurBiche/rustdesk-web-client`, branche `fix-build`, verrouillée au commit indiqué dans `RUSTDESK_EXPECTED_COMMIT`. Une autre source peut être choisie avec `RUSTDESK_REPO` et `RUSTDESK_TAG`; `RUSTDESK_COMMIT` permet de verrouiller explicitement n’importe quelle source sur un SHA.
+
+L’archive `web_deps.tar.gz` est lue depuis le checkout courant : un build d’un commit donné n’utilise donc plus silencieusement l’archive d’une autre révision de `main`.
+
+## Configuration `.env`
+
+Toutes les valeurs disponibles sont documentées dans [config-examples.env](config-examples.env). Les variables déjà définies dans l’environnement appelant ont priorité sur celles du fichier `.env`.
+
+Principales valeurs :
+
+| Variable | Défaut | Usage |
+|---|---|---|
+| `WEB_PORT` | `5000` | Port HTTP publié sur l’hôte |
+| `BACKEND_HOST` | `127.0.0.1` | Backend des routes API/WebSocket |
+| `PROTO` | `http` | Protocole du backend (`http` ou `https`) |
+| `RUSTDESK_REPO` | `MonsieurBiche/rustdesk-web-client` | Dépôt source |
+| `RUSTDESK_TAG` | `fix-build` | Branche ou tag source |
+| `RUSTDESK_COMMIT` | vide | SHA explicite facultatif |
+| `ENABLE_WSS` | `true` | Conversion des URL `ws://` en `wss://` pendant le build |
+| `FLUTTER_VERSION` | `3.22.1` | Version Flutter utilisée pour compiler |
+| `RUST_VERSION` | `1.97.0` | Toolchain Rust utilisée pour la cible WebAssembly |
+
+Attention : `127.0.0.1` désigne le conteneur web lui-même. Fournissez un autre hôte si le backend RustDesk tourne dans un autre conteneur ou sur une autre machine.
+
+## Validation
+
+Les contrôles locaux rapides sont :
+
+```bash
+bash -n build.sh v1/server/server.sh tests/*.sh
+sh -n docker/nginx/entrypoint.sh
+python3 -m unittest discover -s tests -p 'test_*.py' -v
+tests/test_build_script.sh
+tests/test_nginx_entrypoint.sh
+docker compose config --quiet
+docker build --check .
+```
+
+La CI exécute les mêmes contrôles, ainsi que ShellCheck et Hadolint.
+
+## Kubernetes
+
+L’exemple historique de déploiement de la variante `v1` est conservé dans [docs/KUBERNETES.md](docs/KUBERNETES.md). Il doit être adapté à l’Ingress, au stockage et aux secrets de chaque environnement.
+
+## Dépannage
+
+```bash
+./build.sh status
+docker compose ps
+docker compose logs --tail=100 rustdesk-web
+curl --fail http://127.0.0.1:5000/
+```
+
+Si les routes `/api/` ou `/ws/*` échouent alors que l’interface se charge, vérifiez que `BACKEND_HOST` est résolu depuis le conteneur et que les ports RustDesk concernés sont accessibles sur le réseau Docker.
+
+## Licence
+
+Ce dépôt suit la licence AGPL-3.0 du projet RustDesk. Consultez [LICENSE](LICENSE) ainsi que les licences incluses dans les dépendances distribuées.

@@ -1,59 +1,33 @@
-version: '3.8'
-
 services:
   rustdesk-web:
     build:
       context: .
       dockerfile: Dockerfile
       args:
-        RUSTDESK_TAG: "fix-build"  # Options: fix-build, enable-wss, add-features
-        RUSTDESK_REPO: "MonsieurBiche/rustdesk-web-client"  # ou rustdesk/rustdesk
-        ENABLE_WSS: "true"
-        FLUTTER_VERSION: "3.22.1"
-    container_name: rustdesk-web-client
+        RUSTDESK_REPO: "${RUSTDESK_REPO:-MonsieurBiche/rustdesk-web-client}"
+        RUSTDESK_TAG: "${RUSTDESK_TAG:-fix-build}"
+        RUSTDESK_COMMIT: "${RUSTDESK_COMMIT:-}"
+        RUSTDESK_EXPECTED_COMMIT: "${RUSTDESK_EXPECTED_COMMIT:-525b5e561faf824850c71500adf463e4e0a504d4}"
+        ENABLE_WSS: "${ENABLE_WSS:-true}"
+        FLUTTER_VERSION: "${FLUTTER_VERSION:-3.22.1}"
+        RUST_VERSION: "${RUST_VERSION:-1.97.0}"
+    image: "${IMAGE_NAME:-rustdesk-web-client}:local"
+    container_name: "${CONTAINER_NAME:-rustdesk-web-client}"
     ports:
-      - "5000:80"
-      - "21117:21117"
+      - "${WEB_PORT:-5000}:80"
     environment:
-      - RUSTDESK_WEB_PORT=5000
-      - RUSTDESK_WS_PORT=21117
+      BACKEND_HOST: "${BACKEND_HOST:-127.0.0.1}"
+      PROTO: "${PROTO:-http}"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost/"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/ >/dev/null || exit 1"]
       interval: 30s
-      timeout: 10s
+      timeout: 5s
       retries: 3
-      start_period: 40s
+      start_period: 10s
     networks:
       - rustdesk-network
 
 networks:
   rustdesk-network:
     driver: bridge
-    ipam:
-      config:
-        - subnet: 172.20.0.0/16
-
-# Configuration pour production avec SSL/TLS
-# Décommentez et configurez selon vos besoins
-#
-# services:
-#   rustdesk-web-ssl:
-#     build:
-#       context: .
-#       dockerfile: Dockerfile
-#     container_name: rustdesk-web-ssl
-#     ports:
-#       - "443:443"
-#       - "21118:21118"  # WSS port
-#     volumes:
-#       - ./ssl:/etc/ssl/certs:ro
-#       - ./nginx-ssl.conf:/etc/nginx/sites-available/rustdesk:ro
-#     environment:
-#       - RUSTDESK_WEB_PORT=443
-#       - RUSTDESK_WSS_PORT=21118
-#       - SSL_CERT_PATH=/etc/ssl/certs/cert.pem
-#       - SSL_KEY_PATH=/etc/ssl/certs/key.pem
-#     restart: unless-stopped
-#     networks:
-#       - rustdesk-network

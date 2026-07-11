@@ -1,291 +1,336 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -Eeuo pipefail
 
-# Script de build automatisé pour RustDesk Web Client
-# Version optimisée avec Flutter 3.22.1
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
 
-set -e  # Arrêt en cas d'erreur
+if [[ -t 1 ]]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'
+    NC='\033[0m'
+else
+    RED=''
+    GREEN=''
+    YELLOW=''
+    BLUE=''
+    NC=''
+fi
 
-# Couleurs pour les logs
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+log_info() { printf '%b[INFO]%b %s\n' "$BLUE" "$NC" "$*"; }
+log_success() { printf '%b[SUCCESS]%b %s\n' "$GREEN" "$NC" "$*"; }
+log_warning() { printf '%b[WARNING]%b %s\n' "$YELLOW" "$NC" "$*"; }
+log_error() { printf '%b[ERROR]%b %s\n' "$RED" "$NC" "$*" >&2; }
 
-# Configuration flexible
-FLUTTER_VERSION="3.22.1"
-RUSTDESK_TAG="${RUSTDESK_TAG:-fix-build}"  # fix-build, enable-wss, add-features
+load_env_file() {
+    local env_file="$1" line key value
+    [[ -f "$env_file" ]] || return 0
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%$'\r'}"
+        [[ "$line" =~ ^[[:space:]]*$ || "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ "$line" =~ ^[[:space:]]*export[[:space:]]+ ]] && line="${line#*export }"
+        if [[ ! "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+            log_error "Ligne .env invalide: $line"
+            return 64
+        fi
+        key="${BASH_REMATCH[1]}"
+        value="${BASH_REMATCH[2]}"
+        if [[ ${#value} -ge 2 ]] \
+            && { [[ "$value" == \"*\" ]] || [[ "$value" == \'*\' ]]; }; then
+            value="${value:1:${#value}-2}"
+        fi
+        if [[ ! -v "$key" ]]; then
+            printf -v "$key" '%s' "$value"
+            export "${key?}"
+        fi
+    done < "$env_file"
+}
+
+ENV_FILE="${ENV_FILE:-$SCRIPT_DIR/.env}"
+load_env_file "$ENV_FILE"
+
+FLUTTER_VERSION="${FLUTTER_VERSION:-3.22.1}"
+RUST_VERSION="${RUST_VERSION:-1.97.0}"
+RUSTDESK_TAG="${RUSTDESK_TAG:-fix-build}"
 RUSTDESK_REPO="${RUSTDESK_REPO:-MonsieurBiche/rustdesk-web-client}"
+RUSTDESK_COMMIT="${RUSTDESK_COMMIT:-}"
+RUSTDESK_EXPECTED_COMMIT="${RUSTDESK_EXPECTED_COMMIT:-525b5e561faf824850c71500adf463e4e0a504d4}"
 ENABLE_WSS="${ENABLE_WSS:-true}"
-IMAGE_NAME="rustdesk-web-client"
-CONTAINER_NAME="rustdesk-web-client"
-WEB_PORT="5000"
-WS_PORT="21117"
+IMAGE_NAME="${IMAGE_NAME:-rustdesk-web-client}"
+CONTAINER_NAME="${CONTAINER_NAME:-rustdesk-web-client}"
+WEB_PORT="${WEB_PORT:-5000}"
+BACKEND_HOST="${BACKEND_HOST:-127.0.0.1}"
+PROTO="${PROTO:-http}"
 
-# Fonctions utilitaires
-log_info() {
-    echo -e "${BLUE}[INFO]${NC} $1"
-}
+COMPOSE=()
 
-log_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
-}
-
-log_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
-}
-
-log_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
-
-# Vérification des prérequis
-check_prerequisites() {
-    log_info "Vérification des prérequis..."
-    
-    if ! command -v docker &> /dev/null; then
-        log_error "Docker n'est pas installé"
-        exit 1
-    fi
-    
-    if ! command -v docker-compose &> /dev/null; then
-        log_warning "Docker Compose non trouvé, utilisation de 'docker compose'"
-        DOCKER_COMPOSE="docker compose"
+detect_compose() {
+    if docker compose version >/dev/null 2>&1; then
+        COMPOSE=(docker compose)
+    elif command -v docker-compose >/dev/null 2>&1; then
+        COMPOSE=(docker-compose)
     else
-        DOCKER_COMPOSE="docker-compose"
+        log_error "Docker Compose n'est pas installé"
+        return 1
     fi
-    
-    # Vérifier l'espace disque (minimum 4GB)
-    AVAILABLE_SPACE=$(df . | tail -1 | awk '{print $4}')
-    if [ "$AVAILABLE_SPACE" -lt 4194304 ]; then  # 4GB en KB
-        log_warning "Espace disque faible (< 4GB). Le build pourrait échouer."
-    fi
-    
-    log_success "Prérequis vérifiés"
 }
 
-# Nettoyage des ressources Docker
+check_prerequisites() {
+    command -v docker >/dev/null 2>&1 || {
+        log_error "Docker n'est pas installé"
+        return 1
+    }
+    docker info >/dev/null 2>&1 || {
+        log_error "Le démon Docker n'est pas accessible"
+        return 1
+    }
+    local available_space
+    available_space="$(df -Pk . | awk 'NR == 2 {print $4}')"
+    if (( available_space < 4194304 )); then
+        log_warning "Espace disque disponible inférieur à 4 Gio"
+    fi
+}
+
+container_exists() {
+    docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1
+}
+
 cleanup() {
-    log_info "Nettoyage des ressources Docker..."
-    
-    # Arrêter et supprimer le conteneur existant
-    if docker ps -a | grep -q "$CONTAINER_NAME"; then
-        log_info "Arrêt du conteneur existant..."
-        docker stop "$CONTAINER_NAME" 2>/dev/null || true
-        docker rm "$CONTAINER_NAME" 2>/dev/null || true
+    if container_exists; then
+        log_info "Suppression du conteneur $CONTAINER_NAME"
+        docker rm --force "$CONTAINER_NAME" >/dev/null
     fi
-    
-    # Supprimer l'image existante
-    if docker images | grep -q "$IMAGE_NAME"; then
-        log_info "Suppression de l'image existante..."
-        docker rmi "$IMAGE_NAME" 2>/dev/null || true
+    if docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
+        log_info "Suppression de l'image $IMAGE_NAME"
+        docker image rm "$IMAGE_NAME" >/dev/null
     fi
-    
     log_success "Nettoyage terminé"
 }
 
-# Build de l'image Docker
 build_image() {
-    log_info "Démarrage du build Docker..."
-    echo "🔧 Building RustDesk Web Client with Flutter $FLUTTER_VERSION..."
-    log_info "Repository: $RUSTDESK_REPO | Tag: $RUSTDESK_TAG | WSS: $ENABLE_WSS"
-    
-    # Activer BuildKit pour de meilleures performances
-    export DOCKER_BUILDKIT=1
-    
-    # Build avec progress et cache
-    docker build \
-        --build-arg FLUTTER_VERSION="$FLUTTER_VERSION" \
-        --build-arg RUSTDESK_TAG="$RUSTDESK_TAG" \
-        --build-arg RUSTDESK_REPO="$RUSTDESK_REPO" \
-        --build-arg ENABLE_WSS="$ENABLE_WSS" \
+    local -a build_args=(
+        --build-arg "FLUTTER_VERSION=$FLUTTER_VERSION"
+        --build-arg "RUST_VERSION=$RUST_VERSION"
+        --build-arg "RUSTDESK_TAG=$RUSTDESK_TAG"
+        --build-arg "RUSTDESK_REPO=$RUSTDESK_REPO"
+        --build-arg "RUSTDESK_COMMIT=$RUSTDESK_COMMIT"
+        --build-arg "RUSTDESK_EXPECTED_COMMIT=$RUSTDESK_EXPECTED_COMMIT"
+        --build-arg "ENABLE_WSS=$ENABLE_WSS"
+    )
+
+    log_info "Build $RUSTDESK_REPO@$RUSTDESK_TAG avec Flutter $FLUTTER_VERSION"
+    DOCKER_BUILDKIT=1 docker build \
+        "${build_args[@]}" \
         --progress=plain \
         --tag "$IMAGE_NAME" \
-        . || {
-        log_error "Échec du build Docker"
-        exit 1
-    }
-    
-    log_success "Build Docker terminé avec succès"
+        .
+    log_success "Image construite: $IMAGE_NAME"
 }
 
-# Démarrage du conteneur
-start_container() {
-    log_info "Démarrage du conteneur..."
-    
-    docker run -d \
+create_container() {
+    if container_exists; then
+        log_error "Le conteneur $CONTAINER_NAME existe déjà; utilisez 'start' ou 'clean'"
+        return 1
+    fi
+
+    docker run --detach \
         --name "$CONTAINER_NAME" \
-        -p "$WEB_PORT:80" \
-        -p "$WS_PORT:21117" \
+        --publish "$WEB_PORT:80" \
+        --env "BACKEND_HOST=$BACKEND_HOST" \
+        --env "PROTO=$PROTO" \
         --restart unless-stopped \
-        "$IMAGE_NAME" || {
-        log_error "Échec du démarrage du conteneur"
-        exit 1
-    }
-    
-    log_success "Conteneur démarré: $CONTAINER_NAME"
+        "$IMAGE_NAME" >/dev/null
+    log_success "Conteneur créé: $CONTAINER_NAME"
 }
 
-# Vérification de la santé du service
+start_container() {
+    if container_exists; then
+        docker start "$CONTAINER_NAME" >/dev/null
+        log_success "Conteneur démarré: $CONTAINER_NAME"
+    else
+        create_container
+    fi
+}
+
 health_check() {
-    log_info "Vérification de la santé du service..."
-    
-    # Attendre que le service soit prêt
-    local max_attempts=30
-    local attempt=1
-    
-    while [ $attempt -le $max_attempts ]; do
-        if curl -f -s "http://localhost:$WEB_PORT/" > /dev/null 2>&1; then
-            log_success "Service accessible sur http://localhost:$WEB_PORT"
+    local attempt
+    command -v curl >/dev/null 2>&1 || {
+        log_error "curl est requis pour le contrôle de santé local"
+        return 1
+    }
+    for attempt in {1..30}; do
+        if (( attempt == 1 )); then
+            log_info "Attente du service sur le port $WEB_PORT"
+        fi
+        if curl --fail --silent --show-error \
+            "http://127.0.0.1:$WEB_PORT/" >/dev/null 2>&1; then
+            log_success "Service accessible sur http://127.0.0.1:$WEB_PORT"
             return 0
         fi
-        
-        log_info "Tentative $attempt/$max_attempts - En attente..."
         sleep 2
-        ((attempt++))
     done
-    
-    log_error "Service non accessible après $max_attempts tentatives"
+    log_error "Service inaccessible après 60 secondes"
+    docker logs --tail 50 "$CONTAINER_NAME" >&2 || true
     return 1
 }
 
-# Affichage des logs
-show_logs() {
-    log_info "Affichage des logs (Ctrl+C pour quitter)..."
-    docker logs -f "$CONTAINER_NAME"
+show_config() {
+    cat <<EOF
+Image              : $IMAGE_NAME
+Conteneur           : $CONTAINER_NAME
+Port web            : $WEB_PORT -> 80
+Backend RustDesk    : $BACKEND_HOST
+Protocole backend   : $PROTO
+Dépôt source        : $RUSTDESK_REPO
+Référence source    : $RUSTDESK_TAG
+Commit explicite    : ${RUSTDESK_COMMIT:-<automatique>}
+Commit stable       : $RUSTDESK_EXPECTED_COMMIT
+Flutter             : $FLUTTER_VERSION
+Rust                : $RUST_VERSION
+Conversion WSS      : $ENABLE_WSS
+EOF
 }
 
-# Affichage des informations de statut
 show_status() {
-    echo
-    log_success "=== RustDesk Web Client - Statut ==="
-    echo -e "${GREEN}✅ Image:${NC} $IMAGE_NAME"
-    echo -e "${GREEN}✅ Conteneur:${NC} $CONTAINER_NAME"
-    echo -e "${GREEN}✅ Web UI:${NC} http://localhost:$WEB_PORT"
-    echo -e "${GREEN}✅ WebSocket:${NC} ws://localhost:$WS_PORT"
-    echo -e "${GREEN}✅ Flutter:${NC} $FLUTTER_VERSION"
-    echo -e "${GREEN}✅ RustDesk:${NC} $RUSTDESK_TAG"
-    echo
-    echo -e "${BLUE}Commandes utiles:${NC}"
-    echo "  docker logs $CONTAINER_NAME          # Voir les logs"
-    echo "  docker exec -it $CONTAINER_NAME bash # Accès shell"
-    echo "  docker stop $CONTAINER_NAME          # Arrêter"
-    echo "  docker start $CONTAINER_NAME         # Redémarrer"
-    echo
+    if ! container_exists; then
+        log_error "Le conteneur $CONTAINER_NAME n'existe pas"
+        return 1
+    fi
+
+    local state health image ports
+    state="$(docker inspect --format '{{.State.Status}}' "$CONTAINER_NAME")"
+    health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}non configuré{{end}}' "$CONTAINER_NAME")"
+    image="$(docker inspect --format '{{.Config.Image}}' "$CONTAINER_NAME")"
+    ports="$(docker port "$CONTAINER_NAME" 80/tcp 2>/dev/null || true)"
+
+    printf 'Conteneur : %s\nImage     : %s\nÉtat      : %s\nSanté     : %s\nPort web  : %s\n' \
+        "$CONTAINER_NAME" "$image" "$state" "$health" "${ports:-non publié}"
 }
 
-# Menu principal
-show_menu() {
-    echo
-    echo -e "${BLUE}=== RustDesk Web Client - Build Script ===${NC}"
-    echo "1. Build complet (nettoyage + build + démarrage)"
-    echo "2. Build seulement"
-    echo "3. Démarrer le conteneur existant"
-    echo "4. Arrêter le conteneur"
-    echo "5. Voir les logs"
-    echo "6. Statut"
-    echo "7. Nettoyage"
-    echo "8. Build avec Docker Compose"
-    echo "0. Quitter"
-    echo
-    read -p "Choisissez une option [0-8]: " choice
+compose_up() {
+    detect_compose
+    "${COMPOSE[@]}" config --quiet
+    "${COMPOSE[@]}" up --build --detach
+    health_check
 }
 
-# Gestion des options
-handle_choice() {
-    case $choice in
-        1)
+usage() {
+    cat <<EOF
+Usage: $0 COMMAND
+
+Commandes:
+  build    Nettoyer, construire l'image et démarrer le conteneur
+  image    Construire uniquement l'image
+  start    Démarrer le conteneur existant, ou le créer depuis l'image
+  stop     Arrêter le conteneur
+  logs     Suivre les logs du conteneur
+  status   Afficher l'état Docker réel
+  config   Afficher la configuration effective
+  compose  Construire et démarrer avec Docker Compose
+  clean    Supprimer le conteneur et l'image locale
+EOF
+}
+
+run_command() {
+    local command="${1:-}"
+    case "$command" in
+        build)
             check_prerequisites
             cleanup
             build_image
-            start_container
-            health_check && show_status
+            create_container
+            health_check
             ;;
-        2)
+        image)
             check_prerequisites
             build_image
             ;;
-        3)
+        start)
+            check_prerequisites
             start_container
-            health_check && show_status
+            health_check
             ;;
-        4)
-            log_info "Arrêt du conteneur..."
-            docker stop "$CONTAINER_NAME" 2>/dev/null || log_warning "Conteneur non trouvé"
-            log_success "Conteneur arrêté"
+        stop)
+            check_prerequisites
+            container_exists && docker stop "$CONTAINER_NAME" >/dev/null
             ;;
-        5)
-            show_logs
+        logs)
+            check_prerequisites
+            docker logs --follow "$CONTAINER_NAME"
             ;;
-        6)
+        status)
+            command -v docker >/dev/null 2>&1 || return 1
             show_status
             ;;
-        7)
+        config)
+            show_config
+            ;;
+        compose)
+            check_prerequisites
+            compose_up
+            ;;
+        clean)
+            check_prerequisites
             cleanup
             ;;
-        8)
-            check_prerequisites
-            log_info "Build avec Docker Compose..."
-            $DOCKER_COMPOSE down 2>/dev/null || true
-            $DOCKER_COMPOSE up --build -d
-            health_check && show_status
-            ;;
-        0)
-            log_info "Au revoir!"
-            exit 0
+        help|-h|--help)
+            usage
             ;;
         *)
-            log_error "Option invalide"
+            usage >&2
+            return 64
             ;;
     esac
 }
 
-# Script principal
-main() {
-    # Si des arguments sont passés, exécuter directement
-    if [ $# -gt 0 ]; then
-        case $1 in
-            "build")
-                check_prerequisites
-                cleanup
-                build_image
-                start_container
-                health_check && show_status
-                ;;
-            "start")
-                start_container
-                health_check && show_status
-                ;;
-            "stop")
-                docker stop "$CONTAINER_NAME" 2>/dev/null || true
-                ;;
-            "logs")
-                show_logs
-                ;;
-            "status")
-                show_status
-                ;;
-            "clean")
-                cleanup
-                ;;
-            *)
-                echo "Usage: $0 [build|start|stop|logs|status|clean]"
-                exit 1
-                ;;
-        esac
-    else
-        # Mode interactif
-        while true; do
-            show_menu
-            handle_choice
-            echo
-            read -p "Appuyez sur Entrée pour continuer..."
-        done
-    fi
+show_menu() {
+    cat <<'EOF'
+
+RustDesk Web Client
+1. Build complet
+2. Build de l'image uniquement
+3. Démarrer
+4. Arrêter
+5. Logs
+6. Statut
+7. Configuration
+8. Docker Compose
+9. Nettoyage
+0. Quitter
+EOF
 }
 
-# Gestion des signaux
-trap 'log_info "Script interrompu"; exit 1' INT TERM
+interactive_menu() {
+    local choice
+    while true; do
+        show_menu
+        read -r -p "Choisissez une option [0-9]: " choice
+        case "$choice" in
+            1) run_command build ;;
+            2) run_command image ;;
+            3) run_command start ;;
+            4) run_command stop ;;
+            5) run_command logs ;;
+            6) run_command status ;;
+            7) run_command config ;;
+            8) run_command compose ;;
+            9) run_command clean ;;
+            0) return 0 ;;
+            *) log_error "Option invalide" ;;
+        esac
+    done
+}
 
-# Exécution
-main "$@"
+trap 'log_error "Script interrompu"; exit 130' INT TERM
+
+if (( $# == 0 )); then
+    interactive_menu
+else
+    if (( $# != 1 )); then
+        usage >&2
+        exit 64
+    fi
+    run_command "$1"
+fi
