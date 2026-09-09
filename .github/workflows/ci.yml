@@ -1,9 +1,7 @@
 name: CI
 
 on:
-  push:
-    paths-ignore:
-      - '.github/workflows/**'
+  workflow_dispatch:
     branches: [main]
   pull_request:
   workflow_dispatch:
