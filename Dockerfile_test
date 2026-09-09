@@ -32,7 +32,6 @@ RUN git clone --branch "${RUSTDESK_TAG}" \
 
 # ————— copie des sources JS ————————
 WORKDIR /src/rustdesk/flutter/web
-RUN if [ -d "v1" ]; then cp -a v1/* .; fi
 
 WORKDIR /src/rustdesk/flutter/web/js
 
