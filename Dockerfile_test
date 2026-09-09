@@ -34,11 +34,6 @@ RUN git clone --branch "${RUSTDESK_TAG}" \
 WORKDIR /src/rustdesk/flutter/web
 RUN if [ -d "v1" ]; then cp -a v1/* .; fi
 
-# --- juste avant WORKDIR /src/rustdesk/flutter/web/js (stage js-build) ------
-RUN sed -i '/chunkFileNames:/a\        manualChunks(id) {\
-          if (id.includes("node_modules")) return "vendor";\
-        },' /src/rustdesk/flutter/web/js/vite.config.js
-
 WORKDIR /src/rustdesk/flutter/web/js
 
 # ————— install Yarn + deps (cache BuildKit) —
