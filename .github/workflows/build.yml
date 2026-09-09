@@ -32,3 +32,5 @@ jobs:
           file: ./Dockerfile_test
           push: true
           tags: ghcr.io/nightvvish/rustdesk-web-current:official-1.4.9
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
