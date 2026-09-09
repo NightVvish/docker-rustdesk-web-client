@@ -29,5 +29,6 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: ./Dockerfile_test
           push: true
-          tags: ghcr.io/nightvvish/rustdesk-web-current:latest
+          tags: ghcr.io/nightvvish/rustdesk-web-current:official-1.4.9
