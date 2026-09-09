@@ -10,7 +10,7 @@ FROM node:20-slim AS js-build
 
 # ————— paramètres build ——————————————
 ARG RUSTDESK_REPO=rustdesk/rustdesk
-ARG RUSTDESK_TAG=1.4.0
+ARG RUSTDESK_TAG=1.4.9
 ARG ENABLE_WSS=false
 
 # ————— dépendances système minimales ————
