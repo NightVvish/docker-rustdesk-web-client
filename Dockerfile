@@ -116,6 +116,56 @@ RUN HTML=/src/rustdesk/flutter/web/index.html && \
 # ————— build JS ————————————————
 RUN yarn build
 
+# Patch RustDesk Web để luôn dùng WebSocket same-origin:
+#   HTTP  -> ws://<host>/ws/id | /ws/relay
+#   HTTPS -> wss://<host>/ws/id | /ws/relay
+RUN python3 - <<'PY'
+from pathlib import Path
+import re
+import sys
+
+js_dir = Path("/src/rustdesk/flutter/web/js/dist")
+files = list(js_dir.glob("index*.js"))
+
+if not files:
+    print("ERROR: Cannot find dist/index*.js")
+    sys.exit(1)
+
+pattern = re.compile(
+    r'function i4\(u,e=!1,i=0\)\{'
+    r'if\(u\.indexOf\(":"\)>0\)\{'
+    r'const a=u\.split\(":"\),t=parseInt\(a\[1\]\);'
+    r'u=a\[0\]\+":"\+\(t\+\(e\?i\|\|3:2\)\)'
+    r'\}else u\+=":"\+\(zi\+\(e\?3:2\)\);'
+    r'return Pi\+u'
+    r'\}'
+)
+
+replacement = (
+    'function i4(u,e=!1,i=0){'
+    'const a=window.location.protocol==="https:"?"wss://":"ws://";'
+    'return a+window.location.host+(e?"/ws/relay":"/ws/id")'
+    '}'
+)
+
+patched = 0
+
+for f in files:
+    s = f.read_text(encoding="utf-8")
+    s2, n = pattern.subn(replacement, s)
+
+    if n:
+        f.write_text(s2, encoding="utf-8")
+        print(f"Patched {f}: {n} occurrence(s)")
+        patched += n
+
+if patched != 1:
+    print(f"ERROR: Expected exactly 1 i4() patch, got {patched}")
+    sys.exit(1)
+
+print("RustDesk WebSocket same-origin patch OK")
+PY
+
 ###############################################################################
 # Étape 2 — Build Flutter Web
 ###############################################################################
